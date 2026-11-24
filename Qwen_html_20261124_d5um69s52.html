@@ -12,7 +12,8 @@
   MeshStandardMaterial, сброс lastChunk, фикс-тик 60Гц, сейв v1 с миграцией,
   ARIA, reduced-motion, подтверждение выхода, ротация splash, context
   restore, InstancedMesh растений, LOD, выгрузка чанков, пул частиц 500.
-  Онлайн: BroadcastChannel (вкладки) + WebRTC datachannel (между ПК, коды).
+  Онлайн: BroadcastChannel (вкладки) + PeerJS/WebRTC (между ПК по ID комнаты,
+  автоматический сигналинг через public PeerServer, ручные SDP-коды как резерв).
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -335,8 +336,8 @@ body.touch #hintCard{display:none}
     <button class="btn primary" id="btnContinue" style="display:none">▶ Продолжить мир</button>
     <button class="btn primary" id="btnSingle">🌍 Новый мир (одиночная игра)</button>
     <button class="btn" id="btnNet">🌐 Комната — играть между вкладками</button>
-    <button class="btn" id="btnRtc">🔗 Прямой онлайн — соединение между ПК</button>
-    <div id="netHint">Комната соединяет вкладки этого браузера. Прямой онлайн соединяет два компьютера через интернет: хост создаёт код, друг вставляет его и возвращает ответ-код.</div>
+    <button class="btn" id="btnRtc">🔗 Прямой онлайн — играть по ID комнаты (между ПК)</button>
+    <div id="netHint">Комната соединяет вкладки этого браузера. Прямой онлайн соединяет компьютеры через интернет: хост задаёт ID комнаты, друзья вводят его — соединение устанавливается автоматически. Ручные SDP-коды — резерв для строгих файрволов.</div>
     <div class="grid2">
       <button class="btn small" id="btnSettingsMenu">⚙ Настройки</button>
       <button class="btn small" id="btnHelpMenu">⌨ Управление</button>
@@ -501,16 +502,27 @@ body.touch #hintCard{display:none}
 <div class="modal" id="rtcModal" role="dialog" aria-modal="true" aria-labelledby="rtcTitle">
   <div class="box panel">
     <h2 id="rtcTitle">🔗 Прямой онлайн (P2P)</h2>
+    <span class="label">ID КОМНАТЫ (латиница/цифры, 3–32)</span>
+    <input class="field" id="rtcRoom" maxlength="32" placeholder="например: dom2026" style="width:100%;margin:4px 0 10px">
     <div style="display:flex;gap:10px;margin-bottom:12px">
-      <button class="btn small primary" id="rtcHost">Я хост — создать код</button>
-      <button class="btn small" id="rtcGuest">Я гость — ввести код</button>
+      <button class="btn small primary" id="rtcHost">Создать комнату</button>
+      <button class="btn small" id="rtcGuest">Подключиться</button>
     </div>
-    <textarea id="rtcCode" placeholder="Код соединения появится здесь / вставьте код друга сюда"></textarea>
-    <div id="rtcStatus">Выберите роль. Хост отправляет вам код, вы вставляете его и возвращаете ответ-код.</div>
+    <details id="rtcManualWrap" style="margin-bottom:10px">
+      <summary style="font-size:13px;color:#d3c7b2;cursor:pointer">Резерв: ручные коды (SDP), если нет доступа к сигналинг-серверу</summary>
+      <div style="display:flex;gap:10px;margin:10px 0">
+        <button class="btn small" id="rtcHostSdp">Хост: код-приглашение</button>
+        <button class="btn small" id="rtcGuestSdp">Гость: по коду</button>
+      </div>
+      <textarea id="rtcCode" placeholder="SDP-код появится здесь / вставьте код сюда и нажмите «Далее»"></textarea>
+      <div style="display:flex;gap:10px;margin-top:8px">
+        <button class="btn small" id="rtcCopy">Копировать код</button>
+        <button class="btn small primary" id="rtcAction" style="flex:1">Далее</button>
+      </div>
+    </details>
+    <div id="rtcStatus">Задайте ID комнаты и нажмите «Создать комнату». Друг вводит тот же ID и жмёт «Подключиться».</div>
     <div style="display:flex;gap:10px">
-      <button class="btn small" id="rtcCopy">Копировать код</button>
-      <button class="btn small primary" id="rtcAction" style="flex:1">Далее</button>
-      <button class="btn small danger" id="rtcClose">Закрыть</button>
+      <button class="btn small danger" id="rtcClose" style="flex:1">Закрыть</button>
     </div>
   </div>
 </div>
@@ -562,7 +574,7 @@ const UI_IDS = [
   'btnSettingsPause','btnHelpMenu','btnHelpPause','joyZone','joyKnob',
   'lookZone','tMine','tPlace','tJump','tFly','tSpdD','tSpdU','tInv','tChat',
   'tPause','tableNear','rtcModal','rtcHost','rtcGuest','rtcCode','rtcStatus',
-  'rtcCopy','rtcAction','rtcClose'
+  'rtcCopy','rtcAction','rtcClose','rtcRoom','rtcHostSdp','rtcGuestSdp'
 ];
 UI_IDS.forEach(id => UI[id] = $(id));
 const clamp = (v,a,b) => v<a?a:v>b?b:v;
@@ -3025,7 +3037,7 @@ function onNetMessage(ev){
           netSend({type:'state',to:m.id,seed:G.seed,edits:serializeEdits(),time:G.time,totalTime:G.totalTime,furnaces:[...furnaces]});
         break;
       case 'state':
-        if(m.to===net.id&&!net.gotState){
+        if((!m.to||m.to===net.id)&&!net.gotState){
           net.gotState=true;
           rIC(()=>net.stateResolve?.({seed:m.seed,edits:m.edits,time:m.time,totalTime:m.totalTime,furnaces:m.furnaces}));
         }
@@ -3093,6 +3105,7 @@ function leaveRoom(){
   try{ net.ch?.close(); }catch(e){}
   try{ net.dc?.close(); }catch(e){}
   try{ net.pc?.close(); }catch(e){}
+  peerCleanup();
   net.on=false; net.ch=null; net.dc=null; net.pc=null;
   updateChip();
 }
@@ -3169,30 +3182,66 @@ function updateBot(b,dt){
   const p=net.players.get(b.id);
   if(p){ p.tp.copy(b.pos); p.tyaw=b.yaw; p.last=1e15; p.speed=sp; p.init=true; }
 }
-// WebRTC manual signaling
+// ==== Online P2P: PeerJS (auto signaling) + manual SDP fallback ====
 const rtc={stage:'idle',pc:null,dc:null};
+const PEERJS_URLS=['https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js',
+                   'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js'];
+let peerLibLoaded=false, peerLibPromise=null;
+function loadPeerLib(){
+  if(peerLibLoaded) return Promise.resolve();
+  if(peerLibPromise) return peerLibPromise;
+  peerLibPromise=new Promise((res,rej)=>{
+    let i=0;
+    const tryNext=()=>{
+      if(i>=PEERJS_URLS.length){ peerLibPromise=null; rej(new Error('не удалось загрузить библиотеку соединения')); return; }
+      const s=document.createElement('script');
+      s.src=PEERJS_URLS[i++];
+      s.onload=()=>{ if(window.Peer){ peerLibLoaded=true; res(); } else tryNext(); };
+      s.onerror=()=>tryNext();
+      document.head.appendChild(s);
+    };
+    tryNext();
+  });
+  return peerLibPromise;
+}
+const ICE_CFG={iceServers:[
+  {urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']},
+  {urls:'stun:global.stun.twilio.com:3478'}
+]};
+const BC_PREFIX='blockcraft-';
+const rtcSanitize=s=>(s||'').trim().toLowerCase().replace(/[^a-z0-9_-]/g,'');
 const rtcB64=s=>btoa(unescape(encodeURIComponent(s)));
 const rtcUnb64=s=>decodeURIComponent(escape(atob(s.trim())));
 function rtcStatus(txt,cls){ UI.rtcStatus.textContent=txt; UI.rtcStatus.className=cls||''; }
 function rtcWaitIce(pc){
   return new Promise(res=>{
     if(pc.iceGatheringState==='complete') return res();
-    const to=setTimeout(res,2500);
+    const to=setTimeout(res,4000);
     pc.addEventListener('icegatheringstatechange',()=>{
       if(pc.iceGatheringState==='complete'){ clearTimeout(to); res(); }
     });
   });
 }
+// --- shared datachannel wiring (works for PeerJS and manual SDP) ---
 function rtcSetupDC(dc){
   rtc.dc=dc;
-  dc.onopen=()=>{
-    net.mode='rtc'; net.dc=dc; net.pc=rtc.pc; net.ch=null;
-    net.on=true; net.room='прямое'; net.myName=netName(); net.gotState=true;
+  dc.onopen=async()=>{
+    net.mode='rtc'; net.dc=dc; net.pc=dc.peerConnection||rtc.pc; net.ch=null;
+    net.on=true; net.room=net.room||(UI.rtcRoom.value.trim()||'прямое'); net.myName=netName();
     UI.rtcModal.classList.remove('open');
-    netSend({type:'hello'});
     startSingleAfterRtc();
+    // Host sends the authoritative world state to everyone who connects
+    if(rtc.isHost){
+      netSend({type:'hello'});
+      const cid=(dc.metadata&&dc.metadata.clientId)||null;
+      netSend({type:'state',to:cid,seed:G.seed,edits:serializeEdits(),time:G.time,totalTime:G.totalTime,furnaces:[...furnaces]});
+    } else {
+      netSend({type:'hello'});
+      setTimeout(()=>{ if(!net.gotState) netSend({type:'hello'}); },1500);
+    }
+    updateChip();
   };
-  dc.onmessage=onNetMessage;
+  dc.onmessage=e=>onNetMessage({data:e.data});
   dc.onclose=()=>{ if(net.on&&net.mode==='rtc'){ chatLine('§ Соединение закрыто','sys'); leaveRoom(); } };
 }
 function startSingleAfterRtc(){
@@ -3205,13 +3254,95 @@ function startSingleAfterRtc(){
     updateNeeded(Math.floor(P.pos.x)>>4,Math.floor(P.pos.z)>>4,true);
   });
 }
-UI.btnRtc.onclick=()=>{ A.click(); UI.rtcModal.classList.add('open'); rtc.stage='idle'; rtcStatus('Выберите роль.'); UI.rtcCode.value=''; };
-UI.rtcClose.onclick=()=>{ UI.rtcModal.classList.remove('open'); try{rtc.pc?.close();}catch(e){} rtc.pc=null; rtc.stage='idle'; };
-UI.rtcCopy.onclick=()=>{ try{ navigator.clipboard.writeText(UI.rtcCode.value); rtcStatus('Код скопирован.','ok'); }catch(e){ rtcStatus('Не удалось скопировать — выделите вручную.','err'); } };
+// --- PeerJS room host ---
+let peerObj=null, peerConns=[];
+function peerCleanup(){
+  try{ peerObj?.destroy(); }catch(e){}
+  peerObj=null;
+  for(const c of peerConns){ try{ c.close(); }catch(e){} }
+  peerConns=[];
+}
 UI.rtcHost.onclick=async()=>{
+  const id=rtcSanitize(UI.rtcRoom.value);
+  if(id.length<3){ rtcStatus('ID комнаты слишком короткий (минимум 3 символа, латиница/цифры).','err'); return; }
+  rtcStatus('Поднимаем комнату на сигналинг-сервере…');
+  try{ await loadPeerLib(); }
+  catch(e){ rtcStatus('Нет интернета для библиотеки соединения. Используйте ручные коды ниже.','err'); return; }
+  peerCleanup();
+  rtc.isHost=true; net.room=id;
   try{
-    rtcStatus('Создаём код…');
-    rtc.pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+    peerObj=new Peer(BC_PREFIX+id,{debug:0});
+  }catch(e){ rtcStatus('Ошибка PeerJS: '+e.message,'err'); return; }
+  peerObj.on('open',()=>{
+    rtcStatus('Комната «'+id+'» создана! Друзья вводят этот ID и жмут «Подключиться».','ok');
+  });
+  peerObj.on('connection',conn=>{
+    peerConns.push(conn);
+    conn.on('data',d=>onNetMessage({data:d}));
+    conn.on('close',()=>{
+      peerConns=peerConns.filter(c=>c!==conn);
+      if(net.on&&conn.metadata&&conn.metadata.clientId) removeNetPlayer(conn.metadata.clientId);
+    });
+    conn.on('error',()=>{});
+    rtcSetupDC(conn);
+  });
+  peerObj.on('error',err=>{
+    if(err.type==='unavailable-id'){ rtcStatus('Комната с таким ID уже занята — придумайте другой или подключитесь как гость.','err'); }
+    else if(err.type==='network'||err.type==='server-error'||err.type==='socket-error'){ rtcStatus('Сигналинг-сервер недоступен. Попробуйте позже или используйте ручные коды ниже.','err'); }
+    else rtcStatus('Ошибка сети: '+(err.type||err.message),'err');
+  });
+  peerObj.on('disconnected',()=>{ try{ peerObj.reconnect(); }catch(e){} });
+};
+// --- PeerJS room guest ---
+UI.rtcGuest.onclick=async()=>{
+  const id=rtcSanitize(UI.rtcRoom.value);
+  if(id.length<3){ rtcStatus('Введите ID комнаты, который дал хост.','err'); return; }
+  rtcStatus('Подключаемся к комнате «'+id+'»…');
+  try{ await loadPeerLib(); }
+  catch(e){ rtcStatus('Нет интернета для библиотеки соединения. Используйте ручные коды ниже.','err'); return; }
+  peerCleanup();
+  rtc.isHost=false; net.room=id;
+  try{
+    peerObj=new Peer({debug:0});
+  }catch(e){ rtcStatus('Ошибка PeerJS: '+e.message,'err'); return; }
+  let connected=false;
+  const connTo=()=>{
+    const conn=peerObj.connect(BC_PREFIX+id,{metadata:{clientId:net.id}});
+    peerConns.push(conn);
+    let tries=0;
+    const retry=setInterval(()=>{
+      if(connected||++tries>4){ clearInterval(retry); return; }
+      try{ conn.send(JSON.stringify({type:'hello',id:net.id,name:net.myName})); }catch(e){}
+    },1200);
+    conn.on('open',()=>{ connected=true; clearInterval(retry); rtcSetupDC(conn); });
+    conn.on('data',d=>onNetMessage({data:d}));
+    conn.on('close',()=>{
+      clearInterval(retry);
+      peerConns=peerConns.filter(c=>c!==conn);
+      if(!connected) rtcStatus('Хост разорвал соединение.','err');
+    });
+    conn.on('error',e=>{ clearInterval(retry); rtcStatus('Ошибка подключения: '+(e.type||e.message),'err'); });
+  };
+  peerObj.on('open',connTo);
+  peerObj.on('error',err=>{
+    if(err.type==='peer-unavailable'){ rtcStatus('Комната «'+id+'» не найдена. Проверьте ID — хост должен сначала нажать «Создать комнату».','err'); }
+    else if(!connected) rtcStatus('Ошибка сети: '+(err.type||err.message),'err');
+  });
+  setTimeout(()=>{ if(!connected&&!peerObj?.destroyed) rtcStatus('Пока не соединились. Убедитесь, что у друга открыта комната с этим ID.','err'); },9000);
+};
+// --- Manual SDP fallback (host<->guest via copy-paste codes) ---
+UI.btnRtc.onclick=()=>{ A.click(); UI.rtcModal.classList.add('open'); rtc.stage='idle'; rtcStatus('Задайте ID комнаты: «Создать комнату» — вы, «Подключиться» — друзья.'); UI.rtcCode.value=''; };
+UI.rtcClose.onclick=()=>{
+  UI.rtcModal.classList.remove('open');
+  try{ rtc.pc?.close(); }catch(e){}
+  rtc.pc=null; rtc.stage='idle';
+  if(!net.on) peerCleanup();
+};
+UI.rtcCopy.onclick=()=>{ try{ navigator.clipboard.writeText(UI.rtcCode.value); rtcStatus('Код скопирован.','ok'); }catch(e){ rtcStatus('Не удалось скопировать — выделите вручную.','err'); } };
+UI.rtcHostSdp.onclick=async()=>{
+  try{
+    rtcStatus('Готовим код-приглашение (собираем адреса)…');
+    rtc.pc=new RTCPeerConnection(ICE_CFG);
     const dc=rtc.pc.createDataChannel('bc');
     rtcSetupDC(dc);
     await rtc.pc.setLocalDescription(await rtc.pc.createOffer());
@@ -3221,12 +3352,12 @@ UI.rtcHost.onclick=async()=>{
     rtcStatus('Отправьте код другу. Когда он вернёт ответ-код — вставьте его сюда и нажмите «Далее».','ok');
   }catch(e){ rtcStatus('Ошибка WebRTC: '+e.message,'err'); }
 };
-UI.rtcGuest.onclick=()=>{ rtc.stage='guest-input'; rtcStatus('Вставьте код хоста и нажмите «Далее».'); UI.rtcCode.value=''; };
+UI.rtcGuestSdp.onclick=()=>{ rtc.stage='guest-input'; rtcStatus('Вставьте код хоста и нажмите «Далее».'); UI.rtcCode.value=''; };
 UI.rtcAction.onclick=async()=>{
   try{
     if(rtc.stage==='guest-input'){
       const offer=JSON.parse(rtcUnb64(UI.rtcCode.value));
-      rtc.pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+      rtc.pc=new RTCPeerConnection(ICE_CFG);
       rtc.pc.ondatachannel=e=>rtcSetupDC(e.channel);
       await rtc.pc.setRemoteDescription(offer);
       await rtc.pc.setLocalDescription(await rtc.pc.createAnswer());
@@ -3238,9 +3369,10 @@ UI.rtcAction.onclick=async()=>{
       const answer=JSON.parse(rtcUnb64(UI.rtcCode.value));
       await rtc.pc.setRemoteDescription(answer);
       rtcStatus('Подключаемся…','ok');
-    } else rtcStatus('Сначала выберите роль.','err');
+    } else rtcStatus('Сначала выберите роль в разделе ручных кодов.','err');
   }catch(e){ rtcStatus('Ошибка: неверный код или '+e.message,'err'); }
 };
+window.addEventListener('beforeunload',()=>{ try{ peerCleanup(); }catch(e){} });
 
 // ==== SECTION: inventory logic ====
 let invUiDirty=false;
